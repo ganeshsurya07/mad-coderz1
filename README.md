@@ -93,3 +93,5 @@ A hackathon project exploring how AI can make healthcare information easier to u
 ---
 
 **AI-Powered Personal Health Copilot** — Making medical information easier to understand, one report at a time.
+
+<img width="1908" height="913" alt="Screenshot 2026-10-13 234728" src="https://github.com/user-attachments/assets/392e0d8d-824b-4e7b-b9e1-75c716eeae89" />
