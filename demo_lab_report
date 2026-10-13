@@ -1,0 +1,17 @@
+**DEMO MEDICAL LABORATORY REPORT**
+Patient: Demo Patient
+Report Date: 10 October 2026
+| Test
+| Result | Unit | Reference Range |
+|----------------- |-----: |----- |--------------- |
+| Hemoglobin
+|
+| Fasting Glucose |
+| Total Cholesterol |
+12.5 | g/dL | 12.0–16.0
+110 | mg/dL | 70–99
+|
+|
+180 | mg/dL | Less than 200 |
+Note: This report is fictional and intended only for software testing.
+Reference ranges are illustrative
