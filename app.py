@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from pypdf import PdfReader
 from PIL import Image
-from groq import Groq
+from google import genai
 from supabase import create_client
 
 
@@ -24,367 +24,190 @@ st.set_page_config(
 
 
 # =========================================================
-# GROQ CONFIGURATION
+# GEMINI CONFIGURATION
 # =========================================================
 
 try:
-    API_KEY = st.secrets.get("GROQ_API_KEY", "")
+    API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
     API_KEY = ""
 
-API_KEY = API_KEY or os.getenv("GROQ_API_KEY", "")
-MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+API_KEY = API_KEY or os.getenv("GEMINI_API_KEY", "")
+
+# Use the model name supported by your Gemini API account.
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 
 def ask_grok(system_prompt, user_prompt, max_tokens=1200):
-    """Generate a response using Groq's chat-completions API."""
+    """Call Gemini with retries and configurable fallback models."""
+
     if not API_KEY:
         raise ValueError(
-            "Groq API key not found. Add GROQ_API_KEY to "
+            "Gemini API key not found. Add GEMINI_API_KEY to "
             ".streamlit/secrets.toml and restart Streamlit."
         )
 
-    client = Groq(api_key=API_KEY)
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            max_completion_tokens=max_tokens,
-            temperature=0.2,
-        )
-    except Exception as error:
-        error_text = str(error).lower()
-        if "401" in error_text or "authentication" in error_text or "invalid api key" in error_text:
-            raise RuntimeError(
-                "Groq rejected the API key. Check GROQ_API_KEY in "
-                ".streamlit/secrets.toml."
-            ) from error
-        if "429" in error_text or "rate limit" in error_text or "quota" in error_text:
-            raise RuntimeError(
-                "Groq rate limit or quota reached. Wait a little and try again, "
-                "or check your Groq console usage limits."
-            ) from error
-        raise RuntimeError(f"Groq request failed: {error}") from error
+    client = genai.Client(api_key=API_KEY)
+    prompt = (
+        f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\n"
+        f"USER REQUEST:\n{user_prompt}"
+    )
 
-    content = response.choices[0].message.content
-    if not content or not content.strip():
-        raise RuntimeError("Groq returned an empty response. Please try again.")
-    return content.strip()
+    # Keep your working model first. Optional fallback model IDs can be
+    # configured in GEMINI_FALLBACK_MODELS as comma-separated values.
+    fallback_models = [
+        name.strip()
+        for name in os.getenv("GEMINI_FALLBACK_MODELS", "").split(",")
+        if name.strip()
+    ]
+    models_to_try = list(dict.fromkeys([MODEL, *fallback_models]))
+    last_error = None
 
-# Supabase configuration
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
-SUPABASE_KEY = st.secrets.get("SUPABASE_ANON_KEY", "")
+    for model_name in models_to_try:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={
+                        "max_output_tokens": max_tokens,
+                        "temperature": 0.2,
+                    },
+                )
+
+                if not response.text:
+                    raise ValueError(
+                        f"Gemini model {model_name} returned an empty response."
+                    )
+
+                return response.text.strip()
+
+            except Exception as error:
+                last_error = error
+                status_code = (
+                    getattr(error, "code", None)
+                    or getattr(error, "status_code", None)
+                )
+                error_text = str(error).upper()
+                status_text = str(status_code or "").upper()
+                retryable = (
+                    status_code in (429, 500, 502, 503, 504)
+                    or status_text in (
+                        "RESOURCE_EXHAUSTED", "UNAVAILABLE", "INTERNAL"
+                    )
+                    or any(
+                        marker in error_text
+                        for marker in (
+                            "429", "500", "502", "503", "504",
+                            "RESOURCE_EXHAUSTED", "UNAVAILABLE",
+                            "HIGH DEMAND", "INTERNAL SERVER ERROR",
+                        )
+                    )
+                )
+
+                # Invalid model names, authentication errors, and other
+                # non-temporary errors should be shown instead of retried.
+                if not retryable:
+                    raise
+
+                if attempt == 0:
+                    time.sleep(2)
+
+        # Both attempts failed for this model; try the next configured one.
+
+    raise RuntimeError(
+        "Gemini is temporarily busy or unavailable for the configured model(s). "
+        "Please wait a minute and try again. If you have a confirmed alternate "
+        "model available to your API key, set GEMINI_FALLBACK_MODELS. "
+        f"Last error: {last_error}"
+    ) from last_error
+
+
+# =========================================================
+# SUPABASE CONFIGURATION AND AUTHENTICATION
+# =========================================================
+
+try:
+    SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+    SUPABASE_KEY = st.secrets.get("SUPABASE_ANON_KEY", "")
+except Exception:
+    SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+    SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+
+SUPABASE_URL = SUPABASE_URL or os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = SUPABASE_KEY or os.getenv("SUPABASE_ANON_KEY", "")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("Supabase configuration is missing. Check your secrets.toml.")
+    st.error("Supabase configuration is missing. Add SUPABASE_URL and SUPABASE_ANON_KEY to your Streamlit secrets.")
     st.stop()
 
-# Create a client for this user's Streamlit session
 if "supabase_client" not in st.session_state:
-    st.session_state.supabase_client = create_client(
-        SUPABASE_URL, SUPABASE_KEY
-    )
-
+    st.session_state.supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase = st.session_state.supabase_client
 
-# Restore the authenticated user's database access on reruns
 if st.session_state.get("supabase_access_token"):
-    supabase.postgrest.auth(
-        st.session_state.supabase_access_token
-    )
+    try:
+        supabase.postgrest.auth(st.session_state.supabase_access_token)
+    except Exception:
+        pass
 
-# Show login/signup before opening the health app
-
-# ---------- PROFESSIONAL LOGIN / SIGNUP ----------
 if not st.session_state.get("supabase_user_id"):
+    st.markdown("""<div class="hero"><h1>🩺 Health Copilot</h1><p>Sign in to securely access your personal health workspace.</p></div>""", unsafe_allow_html=True)
+    login_tab, signup_tab = st.tabs(["Sign in", "Create account"])
 
-    # Login page styling
-    st.markdown("""
-    <style>
-    .block-container {
-        max-width: 850px;
-        padding-top: 3rem;
-        padding-bottom: 3rem;
-    }
-    [data-testid="stAppViewContainer"] {
-        background: linear-gradient(135deg, #f4f8fc 0%, #edf4f5 100%);
-    }
-    [data-testid="stHeader"] {
-        background: transparent;
-    }
-    .auth-hero {
-        text-align: center;
-        padding: 18px 10px 24px 10px;
-    }
-    .auth-logo {
-        display: inline-block;
-        background: #dff5ed;
-        color: #087f68;
-        border-radius: 18px;
-        padding: 14px 17px;
-        font-size: 30px;
-        margin-bottom: 15px;
-    }
-    .auth-title {
-        font-size: 34px;
-        font-weight: 750;
-        color: #153448;
-        letter-spacing: -1px;
-        margin-bottom: 8px;
-    }
-    .auth-subtitle {
-        font-size: 16px;
-        color: #637887;
-        line-height: 1.6;
-    }
-    [data-testid="stForm"] {
-        background: white;
-        border: 1px solid #e1e9ee;
-        border-radius: 16px;
-        padding: 24px;
-        box-shadow: 0 8px 28px rgba(25, 55, 75, 0.06);
-    }
-    [data-testid="stTextInput"] label {
-        color: #294657;
-        font-weight: 600;
-    }
-    [data-testid="stTextInput"] input {
-        border-radius: 9px;
-        min-height: 44px;
-    }
-    .auth-note {
-        background: #f0f7f6;
-        border: 1px solid #dcece8;
-        border-radius: 10px;
-        padding: 13px 15px;
-        color: #355b59;
-        font-size: 13px;
-        line-height: 1.8;
-        margin: 12px 0 18px 0;
-    }
-    .auth-footer {
-        text-align: center;
-        color: #718390;
-        font-size: 12px;
-        padding-top: 22px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
-    <div class="auth-hero">
-        <div class="auth-logo">✚</div>
-        <div class="auth-title">Health Copilot</div>
-        <div class="auth-subtitle">
-            Your health information, organized in one place.<br>
-            Sign in to securely access your personal health dashboard.
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Center the authentication panel
-    left_space, auth_column, right_space = st.columns([1, 1.5, 1])
-
-    with auth_column:
-        login_tab, signup_tab = st.tabs(
-            ["Sign in", "Create account"]
-        )
-
-        # ---------- LOGIN ----------
-        with login_tab:
-            st.markdown("### Welcome back")
-            st.caption("Enter your account details to continue.")
-
-            with st.form("login_form"):
-                login_email = st.text_input(
-                    "Email address",
-                    placeholder="you@example.com",
-                )
-                login_password = st.text_input(
-                    "Password",
-                    type="password",
-                    placeholder="Enter your password",
-                )
-
-                login_submit = st.form_submit_button(
-                    "Sign in",
-                    use_container_width=True,
-                    type="primary",
-                )
-
-            if login_submit:
-                if not login_email.strip() or not login_password:
-                    st.warning("Please enter both your email and password.")
+    with login_tab:
+        with st.form("login_form"):
+            login_email = st.text_input("Email address", key="login_email")
+            login_password = st.text_input("Password", type="password", key="login_password")
+            login_submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+        if login_submitted:
+            try:
+                result = supabase.auth.sign_in_with_password({"email": login_email.strip(), "password": login_password})
+                if result.user and result.session:
+                    st.session_state.supabase_user_id = result.user.id
+                    st.session_state.supabase_access_token = result.session.access_token
+                    st.session_state.records_loaded_for = None
+                    st.session_state.records = []
+                    st.session_state.last_analysis = None
+                    st.session_state.chat_history = []
+                    st.rerun()
                 else:
-                    try:
-                        result = supabase.auth.sign_in_with_password({
-                            "email": login_email.strip(),
-                            "password": login_password,
-                        })
+                    st.error("Sign-in was not completed. Check your email and password.")
+            except Exception as error:
+                st.error(f"Unable to sign in: {error}")
 
-                        if result.user and result.session:
-                            st.session_state.supabase_user_id = str(
-                                result.user.id
-                            )
-                            st.session_state.supabase_access_token = (
-                                result.session.access_token
-                            )
-                            st.session_state.pop(
-                                "records_loaded_for", None
-                            )
-                            st.rerun()
-                        else:
-                            st.error(
-                                "Sign-in could not be completed. "
-                                "Check whether your email is confirmed."
-                            )
-
-                    except Exception as e:
-                        st.error(
-                            "Sign-in failed. Check your email and password."
-                        )
-                        with st.expander("View error details"):
-                            st.code(str(e))
-
-        # ---------- SIGNUP ----------
-        with signup_tab:
-            st.markdown("### Create your account")
-            st.caption(
-                "Set up an account to access your personal health records."
-            )
-
-            st.markdown("""
-            <div class="auth-note">
-                <strong>Password requirements</strong><br>
-                • At least 8 characters<br>
-                • At least one uppercase letter (A–Z)<br>
-                • At least one lowercase letter (a–z)<br>
-                • At least one number (0–9)<br>
-                • At least one special character (!@#$, etc.)
-            </div>
-            """, unsafe_allow_html=True)
-
-            with st.form("signup_form"):
-                signup_email = st.text_input(
-                    "Email address",
-                    placeholder="you@example.com",
-                    key="signup_email",
-                )
-                signup_password = st.text_input(
-                    "Create password",
-                    type="password",
-                    placeholder="Create a strong password",
-                    key="signup_password",
-                )
-                confirm_password = st.text_input(
-                    "Confirm password",
-                    type="password",
-                    placeholder="Enter your password again",
-                    key="confirm_password",
-                )
-
-                signup_submit = st.form_submit_button(
-                    "Create account",
-                    use_container_width=True,
-                    type="primary",
-                )
-
-            if signup_submit:
-                email = signup_email.strip()
-                password = signup_password
-
-                # Validate fields
-                if not email or not password or not confirm_password:
-                    st.warning("Please complete all fields.")
-
-                elif (
-                    "@" not in email
-                    or "." not in email.split("@")[-1]
-                ):
-                    st.warning("Please enter a valid email address.")
-
-                elif len(password) < 8:
-                    st.warning(
-                        "Your password must contain at least 8 characters."
-                    )
-
-                elif not any(c.isupper() for c in password):
-                    st.warning(
-                        "Add at least one uppercase letter (A–Z)."
-                    )
-
-                elif not any(c.islower() for c in password):
-                    st.warning(
-                        "Add at least one lowercase letter (a–z)."
-                    )
-
-                elif not any(c.isdigit() for c in password):
-                    st.warning("Add at least one number (0–9).")
-
-                elif not any(
-                    not c.isalnum() and not c.isspace()
-                    for c in password
-                ):
-                    st.warning(
-                        "Add at least one special character, such as ! or #."
-                    )
-
-                elif password != confirm_password:
-                    st.warning("The passwords do not match.")
-
-                else:
-                    try:
-                        result = supabase.auth.sign_up({
-                            "email": email,
-                            "password": password,
-                        })
-
-                        if result.user and result.session:
-                            st.session_state.supabase_user_id = str(
-                                result.user.id
-                            )
-                            st.session_state.supabase_access_token = (
-                                result.session.access_token
-                            )
-                            st.session_state.pop(
-                                "records_loaded_for", None
-                            )
-                            st.success("Account created successfully!")
-                            st.rerun()
-
-                        elif result.user:
-                            st.success(
-                                "Your account was created. Please check "
-                                "your email for a confirmation link, then "
-                                "return to the Sign in tab."
-                            )
-
-                        else:
-                            st.error(
-                                "Supabase did not return an account. "
-                                "Please try again."
-                            )
-
-                    except Exception as e:
-                        st.error(
-                            "Account creation failed. See the details "
-                            "below to identify the cause."
-                        )
-                        with st.expander("View error details"):
-                            st.code(str(e))
-
-    st.markdown("""
-    <div class="auth-footer">
-        Personal Health Copilot · Your health journey, organized
-    </div>
-    """, unsafe_allow_html=True)
-
+    with signup_tab:
+        with st.form("signup_form"):
+            signup_email = st.text_input("Email address", key="signup_email")
+            signup_password = st.text_input("Create password", type="password", key="signup_password", help="Use at least 8 characters, including uppercase, lowercase, a number, and a special character.")
+            signup_confirm = st.text_input("Confirm password", type="password", key="signup_confirm")
+            signup_submitted = st.form_submit_button("Create account", type="primary", use_container_width=True)
+        if signup_submitted:
+            password_ok = (len(signup_password) >= 8 and re.search(r"[A-Z]", signup_password) and re.search(r"[a-z]", signup_password) and re.search(r"\d", signup_password) and re.search(r"[^A-Za-z0-9]", signup_password))
+            if not signup_email.strip() or "@" not in signup_email:
+                st.error("Enter a valid email address.")
+            elif not password_ok:
+                st.error("Use at least 8 characters, with uppercase, lowercase, a number, and a special character.")
+            elif signup_password != signup_confirm:
+                st.error("The passwords do not match.")
+            else:
+                try:
+                    result = supabase.auth.sign_up({"email": signup_email.strip(), "password": signup_password})
+                    if result.user and result.session:
+                        st.session_state.supabase_user_id = result.user.id
+                        st.session_state.supabase_access_token = result.session.access_token
+                        st.session_state.records_loaded_for = None
+                        st.session_state.records = []
+                        st.session_state.last_analysis = None
+                        st.session_state.chat_history = []
+                        st.success("Account created successfully.")
+                        st.rerun()
+                    else:
+                        st.success("Account created. Check your email to confirm your account, then sign in.")
+                except Exception as error:
+                    st.error(f"Unable to create account: {error}")
+    st.caption("Your health records are associated with your account. Do not use this prototype for emergencies.")
     st.stop()
-# ---------- END LOGIN / SIGNUP ----------
-
 
 
 # =========================================================
@@ -402,6 +225,28 @@ if "language" not in st.session_state:
 
 if "last_analysis" not in st.session_state:
     st.session_state.last_analysis = None
+
+
+# Load this user's saved records once per authenticated session.
+current_user_id = st.session_state.supabase_user_id
+if st.session_state.get("records_loaded_for") != current_user_id:
+    try:
+        load_result = (
+            supabase.table("health_records")
+            .select("*")
+            .order("uploaded_at", desc=True)
+            .execute()
+        )
+        st.session_state.records = load_result.data or []
+        st.session_state.records_loaded_for = current_user_id
+        st.session_state.last_analysis = (
+            st.session_state.records[0] if st.session_state.records else None
+        )
+    except Exception as error:
+        st.error("Unable to load your saved health records. Check the Supabase table and row-level security policies.")
+        with st.expander("Database error details"):
+            st.code(str(error))
+        st.stop()
 
 
 # =========================================================
@@ -432,51 +277,71 @@ st.markdown(
     }
 
     .hero {
-        background: linear-gradient(120deg, #123047 0%, #176B67 58%, #2B8A83 100%);
-        padding: 34px;
-        border-radius: 22px;
+        background: linear-gradient(120deg, #142746, #244c79);
+        padding: 30px;
+        border-radius: 18px;
         color: white;
         margin-bottom: 24px;
-        box-shadow: 0 12px 32px rgba(18, 48, 71, 0.12);
     }
-    .hero h1 { color: white; font-size: 32px; font-weight: 800; margin-bottom: 8px; }
-    .hero p { color: #E0F2F1; font-size: 15px; margin-bottom: 0; line-height: 1.65; }
+
+    .hero h1 {
+        color: white;
+        font-size: 32px;
+        margin-bottom: 8px;
+    }
+
+    .hero p {
+        color: #dbeafe;
+        font-size: 15px;
+        margin-bottom: 0;
+    }
+
     .metric-card {
-        background: white; border: 1px solid #E3EAEF; border-radius: 16px;
-        padding: 20px; min-height: 125px; box-shadow: 0 4px 14px rgba(25, 50, 70, 0.035);
+        background: white;
+        border: 1px solid #e4eaf3;
+        border-radius: 15px;
+        padding: 20px;
+        min-height: 125px;
     }
-    .metric-label { color: #607080; font-size: 13px; font-weight: 600; }
-    .metric-value { color: #123047; font-size: 29px; font-weight: 800; margin-top: 9px; }
-    .metric-note { color: #718096; font-size: 12px; margin-top: 5px; }
+
+    .metric-label {
+        color: #64748b;
+        font-size: 13px;
+        font-weight: 600;
+    }
+
+    .metric-value {
+        color: #172b4d;
+        font-size: 29px;
+        font-weight: 800;
+        margin-top: 9px;
+    }
+
+    .metric-note {
+        color: #64748b;
+        font-size: 12px;
+        margin-top: 5px;
+    }
+
     .section-card {
-        background: white; padding: 22px; border-radius: 16px;
-        border: 1px solid #E3EAEF; margin-bottom: 16px;
+        background: white;
+        padding: 22px;
+        border-radius: 15px;
+        border: 1px solid #e4eaf3;
+        margin-bottom: 16px;
     }
-    .action-card {
-        background: white; border: 1px solid #E3EAEF; border-radius: 18px;
-        padding: 20px 20px 14px 20px; min-height: 170px;
-        box-shadow: 0 5px 18px rgba(25, 50, 70, 0.04);
-    }
-    .action-icon {
-        display: inline-block; background: #E8F5F2; color: #176B67;
-        padding: 10px 12px; border-radius: 12px; font-size: 22px; margin-bottom: 10px;
-    }
+
     div.stButton > button {
-        border-radius: 10px; font-weight: 650; min-height: 44px;
-        border: 1px solid #D9E4E8; transition: all 0.15s ease;
+        border-radius: 9px;
+        font-weight: 600;
+        min-height: 42px;
     }
-    div.stButton > button[kind="primary"] {
-        background: #176B67; border-color: #176B67; color: white;
-    }
-    div.stButton > button:hover { border-color: #176B67; color: #176B67; }
+
     [data-testid="stFileUploader"] {
-        background: white; border: 1px dashed #B8CBCF; border-radius: 14px; padding: 12px;
+        background: white;
+        border-radius: 12px;
+        padding: 10px;
     }
-    [data-testid="stSidebar"] { background: #123047; }
-    [data-testid="stSidebar"] * { color: #F3F8FA; }
-    [data-testid="stSidebar"] [data-testid="stRadio"] label { padding: 5px 0; }
-    h1, h2, h3 { letter-spacing: -0.025em; }
-    .stApp { background: #F5F8FA; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -491,7 +356,7 @@ TRANSLATIONS = {
     "English": {
         "overview": "Overview",
         "documents": "Medical Documents",
-        "timeline": "Health History",
+        "timeline": "Health Timeline",
         "copilot": "AI Copilot",
         "export": "Data Export",
         "welcome": "Your personal health, organized.",
@@ -505,7 +370,7 @@ TRANSLATIONS = {
     "Telugu": {
         "overview": "ముఖ్య సమాచారం",
         "documents": "వైద్య పత్రాలు",
-        "timeline": "ఆరోగ్య చరిత్ర",
+        "timeline": "ఆరోగ్య టైమ్‌లైన్",
         "copilot": "AI సహాయకుడు",
         "export": "డేటా ఎగుమతి",
         "welcome": "మీ ఆరోగ్య సమాచారాన్ని ఒకే చోట నిర్వహించండి.",
@@ -560,7 +425,7 @@ def extract_document(uploaded_file):
 # =========================================================
 
 def parse_json_response(text):
-    """Parse JSON returned by the AI model."""
+    """Parse JSON returned by Gemini."""
     cleaned = text.strip()
 
     cleaned = re.sub(
@@ -580,7 +445,7 @@ def parse_json_response(text):
             return json.loads(match.group(0))
 
         raise ValueError(
-            "The AI model did not return valid JSON. Please try again."
+            "Gemini did not return valid JSON. Please try again."
         )
 
 
@@ -812,38 +677,31 @@ with st.sidebar:
 
     st.markdown("### Navigation")
 
-    page_options = [
-        T["overview"],
-        T["documents"],
-        T["timeline"],
-        T["copilot"],
-        T["export"],
-    ]
-
-    # Apply dashboard navigation requests BEFORE creating the radio widget.
-    # Streamlit does not allow changing a widget's keyed state after it is rendered.
-    pending_page = st.session_state.pop("pending_page_nav", None)
-    if pending_page in page_options:
-        st.session_state.page_nav = pending_page
-    if st.session_state.get("page_nav") not in page_options:
-        st.session_state.page_nav = T["overview"]
-
     page = st.radio(
         "Choose a page",
-        page_options,
-        key="page_nav",
+        [
+            T["overview"],
+            T["documents"],
+            T["timeline"],
+            T["copilot"],
+            T["export"],
+        ],
         label_visibility="collapsed",
     )
 
     st.divider()
 
     st.markdown("### Your workspace")
-    st.caption(
-        f"Documents in this session: "
-        f"{len(st.session_state.records)}"
-    )
-
-    st.caption("Your records are not stored in a permanent database.")
+    st.caption(f"Saved health records: {len(st.session_state.records)}")
+    st.caption("Your records are synced to your account.")
+    if st.button("Sign out", use_container_width=True):
+        try:
+            supabase.auth.sign_out()
+        except Exception:
+            pass
+        for key in ("supabase_user_id", "supabase_access_token", "records_loaded_for", "records", "last_analysis", "chat_history"):
+            st.session_state.pop(key, None)
+        st.rerun()
 
 
 # =========================================================
@@ -888,7 +746,7 @@ if page == T["overview"]:
         metric_card(
             "Documents uploaded",
             total_documents,
-            "Files in this session",
+            "Saved to your account",
         )
 
     with c2:
@@ -905,64 +763,37 @@ if page == T["overview"]:
             "Mentioned in uploaded documents",
         )
 
-    st.markdown("## What would you like to do?")
-    st.caption("Choose a starting point. You can return to this dashboard anytime.")
+    st.markdown("## Get started")
 
-    a1, a2, a3 = st.columns(3, gap="medium")
+    left, right = st.columns(2)
 
-    with a1:
+    with left:
         st.markdown(
             """
-            <div class="action-card">
-                <div class="action-icon">📄</div>
-                <h3>Upload documents</h3>
-                <p style="color:#64748b;font-size:14px;">
-                    Add lab reports, prescriptions, or medical documents
-                    and get a simple AI-generated summary.
+            <div class="section-card">
+                <h3>📄 Medical document analysis</h3>
+                <p>
+                    Upload lab reports, prescriptions, and other
+                    medical documents to get a short summary.
                 </p>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        if st.button("Upload a report  →", key="home_upload", type="primary", use_container_width=True):
-            st.session_state.pending_page_nav = T["documents"]
-            st.rerun()
 
-    with a2:
+    with right:
         st.markdown(
             """
-            <div class="action-card">
-                <div class="action-icon">🗂️</div>
-                <h3>Overview & history</h3>
-                <p style="color:#64748b;font-size:14px;">
-                    Review previously analyzed reports, summaries,
-                    findings, and your health timeline.
+            <div class="section-card">
+                <h3>💬 AI Health Copilot</h3>
+                <p>
+                    Ask questions about your uploaded reports and
+                    get explanations in simple language.
                 </p>
             </div>
             """,
             unsafe_allow_html=True,
         )
-        if st.button("View health history  →", key="home_history", use_container_width=True):
-            st.session_state.pending_page_nav = T["timeline"]
-            st.rerun()
-
-    with a3:
-        st.markdown(
-            """
-            <div class="action-card">
-                <div class="action-icon">💬</div>
-                <h3>AI Copilot</h3>
-                <p style="color:#64748b;font-size:14px;">
-                    Ask questions about your reports and understand
-                    medical terms in everyday language.
-                </p>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        if st.button("Ask the Copilot  →", key="home_copilot", use_container_width=True):
-            st.session_state.pending_page_nav = T["copilot"]
-            st.rerun()
 
     st.markdown("## Recent documents")
 
@@ -1030,7 +861,7 @@ elif page == T["documents"]:
                         st.text(extracted_text[:10000])
 
                     with st.spinner(
-                        "Analyzing your report with Groq AI... "
+                        "Analyzing your report with Gemini... "
                         "This may take a little time."
                     ):
                         analysis = analyze_medical_document(
@@ -1040,17 +871,34 @@ elif page == T["documents"]:
 
                     record = {
                         "filename": selected_file.name,
-                        "uploaded_at": datetime.now().strftime(
-                            "%Y-%m-%d %H:%M:%S"
-                        ),
+                        "uploaded_at": datetime.now().astimezone().isoformat(),
                         "document_text": extracted_text,
                         "analysis": analysis,
                     }
 
-                    st.session_state.records.append(record)
-                    st.session_state.last_analysis = record
-
-                    st.success("Your report has been analyzed!")
+                    try:
+                        saved_result = (
+                            supabase.table("health_records")
+                            .insert({
+                                "user_id": st.session_state.supabase_user_id,
+                                "filename": record["filename"],
+                                "uploaded_at": record["uploaded_at"],
+                                "document_text": record["document_text"],
+                                "analysis": record["analysis"],
+                            })
+                            .execute()
+                        )
+                        if not saved_result.data:
+                            raise RuntimeError("Supabase did not return the saved record.")
+                        record["id"] = saved_result.data[0]["id"]
+                        st.session_state.records.insert(0, record)
+                        st.session_state.last_analysis = record
+                        st.success("Your report has been analyzed and saved to your account!")
+                    except Exception as db_error:
+                        st.session_state.last_analysis = record
+                        st.error("Your report was analyzed, but it could not be saved to your account.")
+                        with st.expander("Database error details"):
+                            st.code(str(db_error))
 
             except Exception as e:
                 st.error(f"Could not analyze the document: {e}")
@@ -1082,20 +930,29 @@ elif page == T["documents"]:
                     "Delete this record",
                     key=f"delete_record_{index}",
                 ):
-                    deleted = st.session_state.records.pop(index)
-
-                    if (
-                        st.session_state.last_analysis
-                        and st.session_state.last_analysis.get("filename")
-                        == deleted.get("filename")
-                    ):
-                        st.session_state.last_analysis = (
-                            st.session_state.records[-1]
-                            if st.session_state.records
-                            else None
-                        )
-
-                    st.rerun()
+                    record_to_delete = st.session_state.records[index]
+                    record_id = record_to_delete.get("id")
+                    try:
+                        if not record_id:
+                            st.error("This record has no database ID, so it cannot be deleted from your account.")
+                        else:
+                            (
+                                supabase.table("health_records")
+                                .delete()
+                                .eq("id", record_id)
+                                .eq("user_id", st.session_state.supabase_user_id)
+                                .execute()
+                            )
+                            st.session_state.records.pop(index)
+                            last_record = st.session_state.last_analysis
+                            if last_record and last_record.get("id") == record_id:
+                                st.session_state.last_analysis = st.session_state.records[0] if st.session_state.records else None
+                            st.success("Record deleted successfully.")
+                            st.rerun()
+                    except Exception as db_error:
+                        st.error("Could not delete the saved database record.")
+                        with st.expander("Database error details"):
+                            st.code(str(db_error))
 
 
 # =========================================================
@@ -1104,10 +961,10 @@ elif page == T["documents"]:
 
 elif page == T["timeline"]:
 
-    st.title("🗂️ Health History")
+    st.title("🗓️ Health Timeline")
 
     st.write(
-        "Review the reports analyzed during your current session."
+        "Review medical reports saved to your health account."
     )
 
     if not st.session_state.records:
@@ -1299,7 +1156,7 @@ support an answer about the user's personal health, say so clearly.
                 error_text = str(e)
                 if any(code in error_text.upper() for code in ("503", "UNAVAILABLE", "HIGH DEMAND")):
                     error_message = (
-                        "Groq is temporarily busy, so I couldn't answer this "
+                        "Gemini is temporarily busy, so I couldn't answer this "
                         "question right now. Your chat and uploaded records are "
                         "still available in this session. Please try again shortly."
                     )
@@ -1328,7 +1185,7 @@ elif page == T["export"]:
     st.title("📦 Data Export")
 
     st.write(
-        "Download the analyzed records from your current session."
+        "Download the health records currently saved to your account."
     )
 
     records = st.session_state.records
@@ -1417,10 +1274,7 @@ elif page == T["export"]:
             use_container_width=True,
         )
 
-        st.warning(
-            "This prototype keeps records in Streamlit session state. "
-            "It does not yet provide a persistent encrypted database."
-        )
+        st.caption("This export includes the health records currently saved to your account. Keep downloaded health information private.")
 
 
 # =========================================================
