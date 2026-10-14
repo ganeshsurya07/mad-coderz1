@@ -4,3 +4,4 @@ pypdf
 Pillow
 groq
 pytesseract
+supabase
