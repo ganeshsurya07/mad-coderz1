@@ -8,6 +8,7 @@ from datetime import datetime
 from pypdf import PdfReader
 from PIL import Image
 from groq import Groq
+from supabase import create_client
 
 
 # =========================================================
@@ -15,7 +16,7 @@ from groq import Groq
 # =========================================================
 
 st.set_page_config(
-    page_title="Health Companion",
+    page_title="Health Copilot",
     page_icon="🩺",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -38,7 +39,10 @@ MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 def ask_grok(system_prompt, user_prompt, max_tokens=1200):
     """Generate a response using Groq's chat-completions API."""
     if not API_KEY:
-        raise ValueError("Service configuration is unavailable. Please try again later or contact the app administrator.")
+        raise ValueError(
+            "Groq API key not found. Add GROQ_API_KEY to "
+            ".streamlit/secrets.toml and restart Streamlit."
+        )
 
     client = Groq(api_key=API_KEY)
     try:
@@ -54,15 +58,333 @@ def ask_grok(system_prompt, user_prompt, max_tokens=1200):
     except Exception as error:
         error_text = str(error).lower()
         if "401" in error_text or "authentication" in error_text or "invalid api key" in error_text:
-            raise RuntimeError("The service could not be reached. Please try again later.") from error
+            raise RuntimeError(
+                "Groq rejected the API key. Check GROQ_API_KEY in "
+                ".streamlit/secrets.toml."
+            ) from error
         if "429" in error_text or "rate limit" in error_text or "quota" in error_text:
-            raise RuntimeError("The service is busy right now. Please wait a moment and try again.") from error
-        raise RuntimeError("The service could not complete your request. Please try again later.") from error
+            raise RuntimeError(
+                "Groq rate limit or quota reached. Wait a little and try again, "
+                "or check your Groq console usage limits."
+            ) from error
+        raise RuntimeError(f"Groq request failed: {error}") from error
 
     content = response.choices[0].message.content
     if not content or not content.strip():
         raise RuntimeError("Groq returned an empty response. Please try again.")
     return content.strip()
+
+# Supabase configuration
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_ANON_KEY", "")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("Supabase configuration is missing. Check your secrets.toml.")
+    st.stop()
+
+# Create a client for this user's Streamlit session
+if "supabase_client" not in st.session_state:
+    st.session_state.supabase_client = create_client(
+        SUPABASE_URL, SUPABASE_KEY
+    )
+
+supabase = st.session_state.supabase_client
+
+# Restore the authenticated user's database access on reruns
+if st.session_state.get("supabase_access_token"):
+    supabase.postgrest.auth(
+        st.session_state.supabase_access_token
+    )
+
+# Show login/signup before opening the health app
+
+# ---------- PROFESSIONAL LOGIN / SIGNUP ----------
+if not st.session_state.get("supabase_user_id"):
+
+    # Login page styling
+    st.markdown("""
+    <style>
+    .block-container {
+        max-width: 850px;
+        padding-top: 3rem;
+        padding-bottom: 3rem;
+    }
+    [data-testid="stAppViewContainer"] {
+        background: linear-gradient(135deg, #f4f8fc 0%, #edf4f5 100%);
+    }
+    [data-testid="stHeader"] {
+        background: transparent;
+    }
+    .auth-hero {
+        text-align: center;
+        padding: 18px 10px 24px 10px;
+    }
+    .auth-logo {
+        display: inline-block;
+        background: #dff5ed;
+        color: #087f68;
+        border-radius: 18px;
+        padding: 14px 17px;
+        font-size: 30px;
+        margin-bottom: 15px;
+    }
+    .auth-title {
+        font-size: 34px;
+        font-weight: 750;
+        color: #153448;
+        letter-spacing: -1px;
+        margin-bottom: 8px;
+    }
+    .auth-subtitle {
+        font-size: 16px;
+        color: #637887;
+        line-height: 1.6;
+    }
+    [data-testid="stForm"] {
+        background: white;
+        border: 1px solid #e1e9ee;
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 8px 28px rgba(25, 55, 75, 0.06);
+    }
+    [data-testid="stTextInput"] label {
+        color: #294657;
+        font-weight: 600;
+    }
+    [data-testid="stTextInput"] input {
+        border-radius: 9px;
+        min-height: 44px;
+    }
+    .auth-note {
+        background: #f0f7f6;
+        border: 1px solid #dcece8;
+        border-radius: 10px;
+        padding: 13px 15px;
+        color: #355b59;
+        font-size: 13px;
+        line-height: 1.8;
+        margin: 12px 0 18px 0;
+    }
+    .auth-footer {
+        text-align: center;
+        color: #718390;
+        font-size: 12px;
+        padding-top: 22px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="auth-hero">
+        <div class="auth-logo">✚</div>
+        <div class="auth-title">Health Copilot</div>
+        <div class="auth-subtitle">
+            Your health information, organized in one place.<br>
+            Sign in to securely access your personal health dashboard.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Center the authentication panel
+    left_space, auth_column, right_space = st.columns([1, 1.5, 1])
+
+    with auth_column:
+        login_tab, signup_tab = st.tabs(
+            ["Sign in", "Create account"]
+        )
+
+        # ---------- LOGIN ----------
+        with login_tab:
+            st.markdown("### Welcome back")
+            st.caption("Enter your account details to continue.")
+
+            with st.form("login_form"):
+                login_email = st.text_input(
+                    "Email address",
+                    placeholder="you@example.com",
+                )
+                login_password = st.text_input(
+                    "Password",
+                    type="password",
+                    placeholder="Enter your password",
+                )
+
+                login_submit = st.form_submit_button(
+                    "Sign in",
+                    use_container_width=True,
+                    type="primary",
+                )
+
+            if login_submit:
+                if not login_email.strip() or not login_password:
+                    st.warning("Please enter both your email and password.")
+                else:
+                    try:
+                        result = supabase.auth.sign_in_with_password({
+                            "email": login_email.strip(),
+                            "password": login_password,
+                        })
+
+                        if result.user and result.session:
+                            st.session_state.supabase_user_id = str(
+                                result.user.id
+                            )
+                            st.session_state.supabase_access_token = (
+                                result.session.access_token
+                            )
+                            st.session_state.pop(
+                                "records_loaded_for", None
+                            )
+                            st.rerun()
+                        else:
+                            st.error(
+                                "Sign-in could not be completed. "
+                                "Check whether your email is confirmed."
+                            )
+
+                    except Exception as e:
+                        st.error(
+                            "Sign-in failed. Check your email and password."
+                        )
+                        with st.expander("View error details"):
+                            st.code(str(e))
+
+        # ---------- SIGNUP ----------
+        with signup_tab:
+            st.markdown("### Create your account")
+            st.caption(
+                "Set up an account to access your personal health records."
+            )
+
+            st.markdown("""
+            <div class="auth-note">
+                <strong>Password requirements</strong><br>
+                • At least 8 characters<br>
+                • At least one uppercase letter (A–Z)<br>
+                • At least one lowercase letter (a–z)<br>
+                • At least one number (0–9)<br>
+                • At least one special character (!@#$, etc.)
+            </div>
+            """, unsafe_allow_html=True)
+
+            with st.form("signup_form"):
+                signup_email = st.text_input(
+                    "Email address",
+                    placeholder="you@example.com",
+                    key="signup_email",
+                )
+                signup_password = st.text_input(
+                    "Create password",
+                    type="password",
+                    placeholder="Create a strong password",
+                    key="signup_password",
+                )
+                confirm_password = st.text_input(
+                    "Confirm password",
+                    type="password",
+                    placeholder="Enter your password again",
+                    key="confirm_password",
+                )
+
+                signup_submit = st.form_submit_button(
+                    "Create account",
+                    use_container_width=True,
+                    type="primary",
+                )
+
+            if signup_submit:
+                email = signup_email.strip()
+                password = signup_password
+
+                # Validate fields
+                if not email or not password or not confirm_password:
+                    st.warning("Please complete all fields.")
+
+                elif (
+                    "@" not in email
+                    or "." not in email.split("@")[-1]
+                ):
+                    st.warning("Please enter a valid email address.")
+
+                elif len(password) < 8:
+                    st.warning(
+                        "Your password must contain at least 8 characters."
+                    )
+
+                elif not any(c.isupper() for c in password):
+                    st.warning(
+                        "Add at least one uppercase letter (A–Z)."
+                    )
+
+                elif not any(c.islower() for c in password):
+                    st.warning(
+                        "Add at least one lowercase letter (a–z)."
+                    )
+
+                elif not any(c.isdigit() for c in password):
+                    st.warning("Add at least one number (0–9).")
+
+                elif not any(
+                    not c.isalnum() and not c.isspace()
+                    for c in password
+                ):
+                    st.warning(
+                        "Add at least one special character, such as ! or #."
+                    )
+
+                elif password != confirm_password:
+                    st.warning("The passwords do not match.")
+
+                else:
+                    try:
+                        result = supabase.auth.sign_up({
+                            "email": email,
+                            "password": password,
+                        })
+
+                        if result.user and result.session:
+                            st.session_state.supabase_user_id = str(
+                                result.user.id
+                            )
+                            st.session_state.supabase_access_token = (
+                                result.session.access_token
+                            )
+                            st.session_state.pop(
+                                "records_loaded_for", None
+                            )
+                            st.success("Account created successfully!")
+                            st.rerun()
+
+                        elif result.user:
+                            st.success(
+                                "Your account was created. Please check "
+                                "your email for a confirmation link, then "
+                                "return to the Sign in tab."
+                            )
+
+                        else:
+                            st.error(
+                                "Supabase did not return an account. "
+                                "Please try again."
+                            )
+
+                    except Exception as e:
+                        st.error(
+                            "Account creation failed. See the details "
+                            "below to identify the cause."
+                        )
+                        with st.expander("View error details"):
+                            st.code(str(e))
+
+    st.markdown("""
+    <div class="auth-footer">
+        Personal Health Copilot · Your health journey, organized
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.stop()
+# ---------- END LOGIN / SIGNUP ----------
+
 
 
 # =========================================================
@@ -167,18 +489,18 @@ st.markdown(
 
 TRANSLATIONS = {
     "English": {
-        "overview": "Home",
-        "documents": "My Health Records",
+        "overview": "Overview",
+        "documents": "Medical Documents",
         "timeline": "Health History",
-        "copilot": "Health Assistant",
-        "export": "Download Records",
-        "welcome": "Your health information, all in one place.",
+        "copilot": "AI Copilot",
+        "export": "Data Export",
+        "welcome": "Your personal health, organized.",
         "subtitle": (
-            "Keep your reports organized, understand your results, "
-            "and find helpful answers to your health questions."
+            "Understand your medical records, organize health "
+            "information, and ask questions about your documents."
         ),
-        "upload": "Add your medical records",
-        "analyze": "Review report",
+        "upload": "Upload medical documents",
+        "analyze": "Analyze document",
     },
     "Telugu": {
         "overview": "ముఖ్య సమాచారం",
@@ -186,13 +508,13 @@ TRANSLATIONS = {
         "timeline": "ఆరోగ్య చరిత్ర",
         "copilot": "AI సహాయకుడు",
         "export": "డేటా ఎగుమతి",
-        "welcome": "మీ ఆరోగ్య సమాచారాన్ని ఒకే చోట ఉంచండి.",
+        "welcome": "మీ ఆరోగ్య సమాచారాన్ని ఒకే చోట నిర్వహించండి.",
         "subtitle": (
-            "మీ వైద్య నివేదికలను సులభంగా అర్థం చేసుకోండి, "
-            "మీ ఆరోగ్య సమాచారాన్ని క్రమబద్ధంగా ఉంచండి."
+            "మీ వైద్య నివేదికలను అర్థం చేసుకోవడానికి, "
+            "ఆరోగ్య సమాచారాన్ని క్రమబద్ధీకరించడానికి సహాయం పొందండి."
         ),
-        "upload": "వైద్య నివేదికలను జోడించండి",
-        "analyze": "నివేదికను చూడండి",
+        "upload": "వైద్య పత్రాలను అప్‌లోడ్ చేయండి",
+        "analyze": "పత్రాన్ని విశ్లేషించండి",
     },
 }
 
@@ -257,7 +579,9 @@ def parse_json_response(text):
         if match:
             return json.loads(match.group(0))
 
-        raise ValueError("We couldn’t prepare the report summary. Please try again.")
+        raise ValueError(
+            "The AI model did not return valid JSON. Please try again."
+        )
 
 
 def safe_list(value):
@@ -471,8 +795,8 @@ def display_analysis(record):
 # =========================================================
 
 with st.sidebar:
-    st.markdown("## 🩺 Health Companion")
-    st.caption("Your health, in one place")
+    st.markdown("## 🩺 Health Copilot")
+    st.caption("Your personal health companion")
     st.divider()
 
     language = st.selectbox(
@@ -513,13 +837,13 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown("### Your records")
+    st.markdown("### Your workspace")
     st.caption(
-        f"Reports available now: "
+        f"Documents in this session: "
         f"{len(st.session_state.records)}"
     )
 
-    st.caption("Records are available during your current visit. Download anything you want to keep.")
+    st.caption("Your records are not stored in a permanent database.")
 
 
 # =========================================================
@@ -564,25 +888,25 @@ if page == T["overview"]:
         metric_card(
             "Documents uploaded",
             total_documents,
-            "Reports currently available",
+            "Files in this session",
         )
 
     with c2:
         metric_card(
             "Key findings",
             total_findings,
-            "Found in your reports",
+            "Extracted from analyzed reports",
         )
 
     with c3:
         metric_card(
             "Medication entries",
             total_medications,
-            "Listed in your reports",
+            "Mentioned in uploaded documents",
         )
 
     st.markdown("## What would you like to do?")
-    st.caption("Choose what you would like to do.")
+    st.caption("Choose a starting point. You can return to this dashboard anytime.")
 
     a1, a2, a3 = st.columns(3, gap="medium")
 
@@ -593,8 +917,8 @@ if page == T["overview"]:
                 <div class="action-icon">📄</div>
                 <h3>Upload documents</h3>
                 <p style="color:#64748b;font-size:14px;">
-                    Add lab reports, prescriptions, or other medical records
-                    and get a clear, easy-to-read summary.
+                    Add lab reports, prescriptions, or medical documents
+                    and get a simple AI-generated summary.
                 </p>
             </div>
             """,
@@ -609,10 +933,10 @@ if page == T["overview"]:
             """
             <div class="action-card">
                 <div class="action-icon">🗂️</div>
-                <h3>Health history</h3>
+                <h3>Overview & history</h3>
                 <p style="color:#64748b;font-size:14px;">
-                    Review your saved-in-this-visit reports, summaries,
-                    and key findings.
+                    Review previously analyzed reports, summaries,
+                    findings, and your health timeline.
                 </p>
             </div>
             """,
@@ -627,10 +951,10 @@ if page == T["overview"]:
             """
             <div class="action-card">
                 <div class="action-icon">💬</div>
-                <h3>Health assistant</h3>
+                <h3>AI Copilot</h3>
                 <p style="color:#64748b;font-size:14px;">
-                    Ask questions about your reports and get clear explanations
-                    of medical terms.
+                    Ask questions about your reports and understand
+                    medical terms in everyday language.
                 </p>
             </div>
             """,
@@ -665,17 +989,18 @@ if page == T["overview"]:
 
 elif page == T["documents"]:
 
-    st.title("📄 My Health Records")
+    st.title("📄 Medical Documents")
 
     st.write(
-        "Add a medical report to see a short, easy-to-understand summary."
+        "Upload a medical report to extract its text and get "
+        "a short, easy-to-understand summary."
     )
 
     uploaded_files = st.file_uploader(
         T["upload"],
         type=["pdf", "png", "jpg", "jpeg"],
         accept_multiple_files=True,
-        help="You can add PDF, PNG, or JPG files.",
+        help="Supported formats: PDF, PNG, JPG, JPEG.",
     )
 
     if uploaded_files:
@@ -694,13 +1019,20 @@ elif page == T["documents"]:
                     extracted_text = extract_document(selected_file)
 
                 if not extracted_text:
-                    st.error("We couldn’t read text from this file. Try a clearer image or a PDF with selectable text.")
+                    st.error(
+                        "No readable text was found. This may be a "
+                        "scanned PDF or unclear image. Scanned PDFs "
+                        "need OCR support."
+                    )
 
                 else:
                     with st.expander("View extracted text"):
                         st.text(extracted_text[:10000])
 
-                    with st.spinner("Reviewing your report..."):
+                    with st.spinner(
+                        "Analyzing your report with Groq AI... "
+                        "This may take a little time."
+                    ):
                         analysis = analyze_medical_document(
                             extracted_text,
                             st.session_state.language,
@@ -718,14 +1050,14 @@ elif page == T["documents"]:
                     st.session_state.records.append(record)
                     st.session_state.last_analysis = record
 
-                    st.success("Your report is ready to review.")
+                    st.success("Your report has been analyzed!")
 
             except Exception as e:
-                st.error("We couldn’t read or review this report. Please check the file and try again.")
+                st.error(f"Could not analyze the document: {e}")
 
     if st.session_state.last_analysis:
         st.divider()
-        st.subheader("Report overview")
+        st.subheader("Analysis results")
         st.caption(
             st.session_state.last_analysis.get("filename", "")
         )
@@ -825,14 +1157,18 @@ elif page == T["timeline"]:
 
 elif page == T["copilot"]:
 
-    st.title("💬 Health Assistant")
+    st.title("💬 AI Health Copilot")
 
     st.write(
-        "Ask questions about your reports and get explanations in simple language."
+        "Ask questions about your uploaded reports. The Copilot will "
+        "use the selected records as context and explain information "
+        "in simple language."
     )
 
     st.info(
-        "This service helps explain health information but cannot diagnose conditions or replace a healthcare professional. For emergencies, seek urgent medical care. Do not use it to decide whether to start, stop, or change medication."
+        "AI-generated answers can be inaccurate. This tool explains "
+        "records; it does not diagnose conditions or replace medical advice. "
+        "Do not use it for emergencies or medication changes."
     )
 
     # Let the user choose which uploaded report(s) should ground the answer.
@@ -841,7 +1177,9 @@ elif page == T["copilot"]:
 
     if not available_records:
         st.warning(
-            "You have not added a report yet. You can still ask a general health question, but the answer will not be based on your personal records."
+            "You have not analyzed a medical report yet. You can still ask "
+            "general health-information questions, but the answer will not "
+            "be based on your personal records."
         )
         record_choice = "General question (no uploaded records)"
     else:
@@ -945,7 +1283,7 @@ Answer using the grounding and safety rules. If the selected records do not
 support an answer about the user's personal health, say so clearly.
 """
 
-                with st.spinner("Preparing your answer..."):
+                with st.spinner("Checking the selected records and preparing an answer..."):
                     answer = ask_grok(
                         system_prompt,
                         user_prompt,
@@ -961,10 +1299,15 @@ support an answer about the user's personal health, say so clearly.
                 error_text = str(e)
                 if any(code in error_text.upper() for code in ("503", "UNAVAILABLE", "HIGH DEMAND")):
                     error_message = (
-                        "The service is busy right now, so I couldn't answer that question. Your chat and reports are still available during this visit. Please try again shortly."
+                        "Groq is temporarily busy, so I couldn't answer this "
+                        "question right now. Your chat and uploaded records are "
+                        "still available in this session. Please try again shortly."
                     )
                 else:
-                    error_message = "I couldn’t prepare an answer just now. Please try again in a moment."
+                    error_message = (
+                        "I couldn't generate an answer. Please try again. "
+                        f"Technical details: {error_text}"
+                    )
                 st.warning(error_message)
                 st.session_state.chat_history.append(
                     {"role": "assistant", "content": error_message}
@@ -982,10 +1325,10 @@ support an answer about the user's personal health, say so clearly.
 
 elif page == T["export"]:
 
-    st.title("📦 Download Records")
+    st.title("📦 Data Export")
 
     st.write(
-        "Download the reports and summaries available during this visit."
+        "Download the analyzed records from your current session."
     )
 
     records = st.session_state.records
@@ -997,9 +1340,12 @@ elif page == T["export"]:
 
     else:
         export_data = {
-            "application": "Health Companion",
+            "application": "Personal Health Copilot",
             "exported_at": datetime.now().isoformat(),
-            "format_note": "Export of the records and summaries available in this app.",
+            "format_note": (
+                "Prototype export. This is not an official FHIR "
+                "resource or an ABDM/ABHA-connected medical record."
+            ),
             "records": records,
         }
 
@@ -1022,9 +1368,12 @@ elif page == T["export"]:
 
         st.divider()
 
-        st.markdown("### Structured record download")
+        st.markdown("### FHIR-inspired export")
 
-        st.caption("A structured copy of the information available in your reports.")
+        st.caption(
+            "This is a simplified demonstration format, not "
+            "validated FHIR."
+        )
 
         fhir_like = {
             "resourceType": "Bundle",
@@ -1068,7 +1417,10 @@ elif page == T["export"]:
             use_container_width=True,
         )
 
-        st.info("Your records are available during the current visit. Download a copy if you need to keep them. Avoid using a shared device for private health information.")
+        st.warning(
+            "This prototype keeps records in Streamlit session state. "
+            "It does not yet provide a persistent encrypted database."
+        )
 
 
 # =========================================================
@@ -1078,6 +1430,7 @@ elif page == T["export"]:
 st.divider()
 
 st.caption(
-    "Health Companion • Information here is for general guidance. Confirm important medical decisions with a qualified healthcare professional."
+    "Health Copilot Prototype • AI-generated information can be "
+    "incorrect. Confirm important medical decisions with a qualified "
+    "healthcare professional."
 )
-
